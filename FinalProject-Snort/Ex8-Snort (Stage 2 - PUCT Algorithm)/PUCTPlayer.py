@@ -1,142 +1,64 @@
-import random  # Importing the random module for selecting random moves
-from PUCTNode import PUCTNode  # Importing the PUCTNode class for tree search nodes
-import numpy as np  # Importing NumPy for mathematical operations like normalization
+import random
+from PUCTNode import PUCTNode
+import numpy as np
+from SnortGame import SnortGame
+import torch
+import torch.nn as nn
 
 class PUCTPlayer:
-    """
-    Represents a player using the Predictor Upper Confidence Tree (PUCT) algorithm.
-    The player uses a neural network for move selection and evaluation.
-
-    Attributes:
-    - network: A trained neural network for evaluating game states.
-    - iterations (int): Number of search iterations performed per move.
-    """
-
-    def __init__(self, network, iterations=10):
-        """
-        Initializes the PUCT player.
-
-        Parameters:
-        - network: The neural network used for policy and value estimation.
-        - iterations (int): Number of simulations to perform before making a move.
-        """
-        self.network = network  # Neural network for move evaluation
-        self.iterations = iterations  # Number of PUCT iterations per move
+    def __init__(self, network, iters=10000, cpuct=1.0):
+        self.network = network
+        self.iters = iters
+        self.cpuct = cpuct  
 
     def select_move(self, game):
-        """
-        Selects the best move using the PUCT algorithm.
+        root = PUCTNode(game)
+        game_state = torch.tensor(game.encode(), dtype=torch.float32).unsqueeze(0)  
+        policy, value = self.network.forward(game_state)
+        policy = policy.squeeze().detach().numpy()  
+        value = value.item()
 
-        Steps:
-        1. Create a root node representing the current game state.
-        2. Perform multiple simulations to build a search tree.
-        3. Return the best move based on the search tree.
+        if game.current_player == 'B': 
+            value = -value  
 
-        Parameters:
-        - game: The current game state.
+        legal_moves = game.legal_moves()
+        policy_logits = np.array([policy[game.size * move[0] + move[1]] for move in legal_moves])
+        policy_probs = np.exp(policy_logits - np.max(policy_logits)) 
+        policy_probs /= np.sum(policy_probs) + 1e-8  
+        move_probs = {move: prob for move, prob in zip(legal_moves, policy_probs)}
 
-        Returns:
-        - tuple: The best move selected based on the search tree.
-        """
-        root = PUCTNode(game)  # Create the root node with the current game state
+        for move, prob in move_probs.items():
+            root.add_child(move, prior=prob)
+        # print("iters: ",self.iters)
+        for _ in range(self.iters):
+            node = self.select(root)
+            node_value = self.evaluate(node)
+            self.backpropagate(node, node_value)
 
-        # Perform multiple search iterations to build the tree
-        for _ in range(self.iterations):
-            leaf = self.traverse(root)  # Traverse the tree to find an expandable node
-            outcome = self.evaluate(leaf)  # Evaluate the node using the neural network
-            self.backpropagate(leaf, outcome)  # Update the tree with the evaluation result
-        
-        # Choose the best move from the root node
-        best_child = root.best_child()
-        if best_child.move is None:
-            raise ValueError("PUCTPlayer: No valid moves found!")  # Ensure a valid move is selected
-        return best_child.move  # Return the selected move
+        best_child = max(root.children, key=lambda child: child.visits)
+        return best_child.move
 
-    def traverse(self, node):
-        """
-        Traverses the search tree to find an expandable node.
-
-        The traversal follows the best UCT score until a leaf node is reached.
-
-        Parameters:
-        - node (PUCTNode): The current node in the tree.
-
-        Returns:
-        - PUCTNode: The leaf node to be expanded.
-        """
-        while node.children:  # While there are children, keep selecting the best one
-            node = node.best_child()
-
-        # If the game has ended, return the terminal node
-        if node.game.status() != 'ongoing':
-            return node
-
-        # Otherwise, expand the tree by adding new children
-        return self.expand(node)
-
-    def expand(self, node):
-        """
-        Expands the tree by adding new child nodes.
-
-        Steps:
-        1. Use the neural network to get policy predictions.
-        2. Normalize the probabilities.
-        3. Create new child nodes for legal moves.
-
-        Parameters:
-        - node (PUCTNode): The node to expand.
-
-        Returns:
-        - PUCTNode: A randomly selected child node.
-        """
-        policy, _ = self.network.predict(node.game.encode())  # Get policy probabilities from the neural network
-        legal_moves = node.game.legal_moves()  # Get the list of legal moves
-
-        # Compute the total probability of legal moves
-        total_prob = sum(policy[move[0] * node.game.size + move[1]] for move in legal_moves)
-        
-        if total_prob == 0:
-            policy /= np.sum(policy)  # Normalize the policy if all values are zero
-
-        # Add child nodes for each legal move
-        for move in legal_moves:
-            move_index = move[0] * node.game.size + move[1]  # Convert move to a linear index
-            prior_probability = policy[move_index]  # Get the probability of this move
-            node.add_child(move, prior_probability)  # Add the move as a child node
-
-        return random.choice(node.children)  # Return a randomly chosen child node
+    def select(self, node):
+        while node.game.status() == SnortGame.ONGOING:
+            if not node.children:
+                return node
+            node = node.best_child(self.cpuct)  
+        return node
 
     def evaluate(self, node):
-        """
-        Evaluates a node using the neural network.
-
-        The neural network returns a value estimate indicating the expected game outcome.
-
-        Parameters:
-        - node (PUCTNode): The node to evaluate.
-
-        Returns:
-        - float: The estimated value of the node.
-        """
-        _, value = self.network.predict(node.game.encode())  # Get value estimate from the neural network
-        return value  # Return the evaluation result
-
-    def backpropagate(self, node, outcome):
-        """
-        Backpropagates the result of a simulation up the search tree.
-
-        Steps:
-        1. Update the visit count (N).
-        2. Update the value estimate (Q).
-        3. Flip the outcome sign to account for alternating turns.
-
-        Parameters:
-        - node (PUCTNode): The node where backpropagation starts.
-        - outcome (float): The evaluation result to propagate.
-        """
+        game_state = torch.tensor(node.game.encode(), dtype=torch.float32).unsqueeze(0)  
+        _, value = self.network.forward(game_state)
+        value = value.item()
+        if node.game.current_player == 'B':  
+            value = -value  
+        return value  
+    
+    def backpropagate(self, node, value):
         while node:
-            node.visits += 1  # Increase the visit count
-            node.Q += (outcome - node.Q) / node.visits  # Update the average value estimate
-            
-            outcome = -outcome  # Flip the sign to reflect opponent's perspective
-            node = node.parent  # Move up the tree to update the parent node
+            node.visits += 1
+
+            if node.game.current_player == 'B':
+                value = -value
+
+            node.q_value = ((node.visits - 1) * node.q_value + value) / node.visits  
+            node = node.parent

@@ -1,40 +1,77 @@
-# Import required classes and functions
-from SnortGame import SnortGame  # Class that defines the rules and mechanics of the Snort game
-from PUCTPlayer import PUCTPlayer  # Class representing a player using the PUCT algorithm
-from GameNetwork import GameNetwork  # Class representing a neural network for learning the game
-from self_play import generate_self_play_data  # Function to generate self-play game data for training the network
+from SnortGame import SnortGame
+from PUCTPlayer import PUCTPlayer
+from MCTSPlayer import MCTSPlayer
+from GameNetwork import GameNetwork
+from Trainer import Trainer
+from tqdm import tqdm  
 
+
+### open the terminal and run python main.py ###
+### notice that we saved the data, so you can use it again because it required a lot of time ###
 def main():
-    """
-    Main function that manages the training and gameplay process.
-    The code trains a neural network for the Snort game using the PUCT algorithm and then plays the game.
-    """
+    print("Welcome to Snort Game!")
 
-    # Step 1: Generate training data through self-play
-    states, visit_counts, winners = generate_self_play_data(num_games=1000)
-    # `states` - List of game states that occurred during self-play
-    # `visit_counts` - Visit count for each move at the root node
-    # `winners` - Game results used to train the value head of the neural network
+    try:
+        size = int(input("Enter board size (default is 5): ").strip() or 5)
+    except ValueError:
+        print("Invalid input! Defaulting to size 5.")
+        size = 5
 
-    # Step 2: Create a neural network for the game
-    network = GameNetwork(input_shape=(102,), num_actions=100)
-    # `input_shape=(102,)` - Defines the input size (encoded game state)
-    # `num_actions=100` - Defines the number of possible actions in the game
+    print("\n🛠 Select player type:")
+    print("1. MCTS (Monte Carlo Tree Search) - Debug mode")
+    print("2. PUCT (Policy Upper Confidence Trees) - Uses a neural network")
+    player_choice= input("Enter 1 or 2: ").strip()
 
-    # Step 3: Train the neural network using the generated self-play data
-    network.train(states, visit_counts, winners, epochs=10)
-    # `epochs=10` - Number of training iterations to improve the network's performance
+    game =SnortGame(size=size)
 
-    # Step 4: Initialize a new Snort game instance
-    game = SnortGame()
+    if player_choice == "1":
+        print("\nRunning with MCTSPlayer (No neural network)")
+        try:
+            iters = int(input("Enter number of MCTS iterations (default 10000): ").strip() or 10000)
+        except ValueError:
+            print("Invalid input! Defaulting to 10,000 iterations.")
+            iters=10000
+        player = MCTSPlayer(iters=iters)
 
-    # Step 5: Create a player that uses the trained PUCT algorithm with the neural network
-    player = PUCTPlayer(network)
+    elif player_choice == "2":
+        print("\nRunning with PUCTPlayer (Neural Network)")
+        network = GameNetwork(input_size=(size * size + 2), action_size=size * size)
 
-    # Step 6: Start the game with the trained player
+        load_model = input("Load pre-trained model? (y/n): ").strip().lower()
+        if load_model == "y":
+            model_path = input("Enter model path (default: snort_model.pth): ").strip() or "snort_model.pth"
+            try:
+                network.load_model(model_path)
+                print(f"Model loaded from {model_path}")
+            except Exception as e:
+                print(f"Failed to load model: {e}")
+                retry = input("Do you want to train a new model instead? (y/n): ").strip().lower()
+                if retry != "y":
+                    print("Exiting program.")
+                    return
+
+        else:
+            print("\nTraining a new neural network...")
+            try:
+                train_iters =int(input("Enter training iterations (default 1000): ").strip() or 1000)
+            except ValueError:
+                print("Invalid input! Defaulting to 1000 iterations.")
+                train_iters = 1000
+
+            trainer =Trainer(network, game, iters=train_iters, lr=0.001)
+            with tqdm(total=train_iters) as pbar:  
+                trainer.train(update_callback=lambda: pbar.update(1))
+            network.save_model("snort_model.pth")
+            print(" New model trained and saved as 'snort_model.pth'.")
+
+        player=PUCTPlayer(network, iters=1000)
+
+    else:
+        print("\n Invalid choice! Defaulting to MCTSPlayer.")
+        player=MCTSPlayer(iters=1000)
+
+    print("\n Starting Game...")
     game.play(player)
 
-# Check if the script is being run directly
 if __name__ == "__main__":
     main()
-    # Calls the `main` function if the script is executed directly (not imported as a module)
